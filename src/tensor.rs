@@ -16,7 +16,10 @@ impl<T: Copy + Clone + Default> Tensor<T> {
             length: length,
         }
     }
-
+// •	.product() 计算所有元素的乘积，用于求出张量中所有元素的数量。
+// •	例如：
+// •	对于 shape = vec![2, 3]，length = 2 * 3 = 6。
+// •	对于 shape = vec![3, 3, 3]，length = 3 * 3 * 3 = 27。
     pub fn default(shape: &Vec<usize>) -> Self {
         let length = shape.iter().product();
         let data = vec![T::default(); length];

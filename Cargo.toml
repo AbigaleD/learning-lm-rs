@@ -9,3 +9,8 @@ serde_json = "1.0"
 safetensors = "0.4.3"
 tokenizers = "0.19.1"
 rand = "0.8"
+
+[package.metadata.scripts]
+run = "RUSTFLAGS='-A unused-variables' cargo run"
+quiet_run = "RUSTFLAGS='-Awarnings' cargo run"
+test = "RUSTFLAGS='-Awarnings' cargo test"

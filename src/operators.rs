@@ -1,6 +1,10 @@
 use crate::tensor::Tensor;
-
+// 从表中获取行向量（gather）
 // get (row) vectors from a 2D table given a list of indices
+// 	1.	输入参数：
+// •	y：目标张量，用于存储提取出的行向量。
+// •	indices：索引张量，表示需要从表中提取的行号。
+// •	table：源二维表
 pub fn gather(y: &mut Tensor<f32>, indices: &Tensor<u32>, table: &Tensor<f32>) {
     let length = indices.size();
     let table_shape = table.shape();
@@ -15,6 +19,24 @@ pub fn gather(y: &mut Tensor<f32>, indices: &Tensor<u32>, table: &Tensor<f32>) {
 }
 
 // RoPE: Rotary Positional Embedding
+// 	1.	输入参数：
+// •	y：需要进行旋转嵌入的张量，形状为[seq_len, n_heads, d]。
+// •	start_pos：序列的起始位置。
+// •	theta：控制频率的参数。
+// 2.	关键逻辑：
+// •	确保输入张量是三维的，提取序列长度（seq_len）、注意力头数（n_heads）和维度（d）。
+// •	遍历序列中的每个token，计算对应的频率（freq），并根据正弦和余弦旋转嵌入更新y
+// 核心公式：
+// •	更新公式：
+
+// \text{data}[i] = a \cdot \cos(\text{freq}) - b \cdot \sin(\text{freq})
+
+
+// \text{data}[i + d/2] = b \cdot \cos(\text{freq}) + a \cdot \sin(\text{freq})
+
+
+// 实现细节：
+//     •	使用theta.powf((i * 2) as f32 / d as f32)计算频率，确保维度间频率逐渐增加。
 pub fn rope(y: &mut Tensor<f32>, start_pos: usize, theta: f32) {
     let shape = y.shape();
     assert!(shape.len() == 3);
@@ -39,6 +61,19 @@ pub fn rope(y: &mut Tensor<f32>, start_pos: usize, theta: f32) {
 
 // softmax(x) = exp(x - max) / sum(exp(x - max))
 // y = softmax(mask(x))
+// 3. masked_softmax函数
+
+// 作用：计算具有掩码的softmax，常用于处理注意力机制中的不规则序列。
+
+// 代码解析：
+// 	1.	输入参数：
+// 	•	y：输入张量，最后两维表示[seq_len, total_seq_len]。
+// 	2.	关键逻辑：
+// 	•	遍历每个batch和每个序列，计算softmax。
+// 	•	在计算softmax时：
+// 	•	找到当前范围内的最大值进行数值稳定化。
+// 	•	计算指数值并归一化为概率。
+// 	•	对超出掩码范围的部分置零。
 pub fn masked_softmax(y: &mut Tensor<f32>) {
     let ndim = y.shape().len();
     assert!(ndim >= 2);
@@ -71,25 +106,95 @@ pub fn masked_softmax(y: &mut Tensor<f32>) {
 }
 
 pub fn rms_norm(y: &mut Tensor<f32>, x: &Tensor<f32>, w: &Tensor<f32>, epsilon: f32) {
-    todo!("实现 rms_norm，计算前做一些必要的检查会帮助你后续调试")
+    // assert!(
+    //     x.shape() == y.shape(),
+    //     "Shapes of x and y must be equal. x: {:?}, y: {:?}",
+    //     x.shape(),
+    //     y.shape()
+    // );
+    assert!(
+        w.shape().len() == 1 && *w.shape() == vec![*x.shape().last().unwrap()],
+        "Shape of w must match the last dimension of x. w: {:?}, x_last_dim: {:?}",
+        w.shape(),
+        x.shape().last()
+    );
+
+   
+    let batch_size = x.shape()[..x.shape().len() - 1].iter().product::<usize>(); // 批大小
+    let dim = *x.shape().last().unwrap(); // 最后一维的长度
+
+    // 获取数据切片
+    let x_data = x.data();
+    let w_data = w.data();
+    let y_data = unsafe { y.data_mut() };
+
+    // 遍历每个批次进行计算
+    for i in 0..batch_size {
+        let start = i * dim;
+        let x_batch = &x_data[start..start + dim];
+        let y_batch = &mut y_data[start..start + dim];
+
+        // 计算当前批次的 RMS
+        let rms = (x_batch.iter().map(|&v| v * v).sum::<f32>() / dim as f32 + epsilon).sqrt();
+
+        for j in 0..dim {
+            y_batch[j] = w_data[j] * x_batch[j] / rms;
+        }
+    }
 }
 
 // y = silu(x) * y
 // hint: this is an element-wise operation
 pub fn swiglu(y: &mut Tensor<f32>, x: &Tensor<f32>) {
-    // let len = y.size();
-    // assert!(len == x.size());
+    let len = y.size();
+    assert!(len == x.size());
 
-    // let _y = unsafe { y.data_mut() };
-    // let _x = x.data();
+    let _y = unsafe { y.data_mut() };
+    let _x = x.data();
 
-    todo!("实现 silu，这里给了一些前期准备工作的提示，你可以参考")
+    for i in 0..len {
+        _y[i] *= _x[i] / (1. + (-_x[i]).exp());
+    }
+    // todo!("实现 silu，这里给了一些前期准备工作的提示，你可以参考")
 }
 
 // C = beta * C + alpha * A @ B^T
 // hint: You don't need to do an explicit transpose of B
 pub fn matmul_transb(c: &mut Tensor<f32>, beta: f32, a: &Tensor<f32>, b: &Tensor<f32>, alpha: f32) {
-    todo!("实现 matmul_transb，计算前做一些必要的检查会帮助你后续调试");
+    
+    assert_eq!(a.shape().len(), 2, "A 必须是 2 维张量");
+    assert_eq!(b.shape().len(), 2, "B 必须是 2 维张量");
+    assert_eq!(c.shape().len(), 2, "C 必须是 2 维张量");
+
+
+    let m = a.shape()[0];
+    let k = a.shape()[1];
+    let n = b.shape()[0];
+    
+
+
+    debug_assert_eq!(k, b.shape()[1]);
+    debug_assert_eq!(c.shape()[0], m);
+    debug_assert_eq!(c.shape()[1], n);
+
+    let a_data = a.data();        // A只读
+    let b_data = b.data();        // B只读
+    let c_data = unsafe { c.data_mut() }; // C要写
+
+    //    c[i, j] = beta * c[i, j] + alpha * Σ_p( A[i, p] * B[j, p] )
+    for i in 0..m {
+        for j in 0..n {
+            // 先乘 beta
+            let mut tmp = beta * c_data[i * n + j];
+            // 再加上 alpha * ( A[i,p] * B[j,p] ) 的累加和
+            let mut sum = 0.0;
+            for p in 0..k {
+                sum += a_data[i * k + p] * b_data[j * k + p];
+            }
+            // 写回 C
+            c_data[i * n + j] = tmp + alpha * sum;
+        }
+    }
 }
 
 // Dot product of two tensors (treated as vectors)
