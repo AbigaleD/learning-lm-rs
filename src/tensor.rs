@@ -1,4 +1,5 @@
 use std::{slice, sync::Arc, vec};
+use std::ops::{Index, IndexMut};
 pub struct Tensor<T> {
     data: Arc<Box<[T]>>,
     shape: Vec<usize>,
@@ -67,7 +68,25 @@ impl<T: Copy + Clone + Default> Tensor<T> {
 
 
 }
+impl Index<usize> for Tensor<f32> {
+    type Output = f32;
 
+    fn index(&self, index: usize) -> &Self::Output {
+        // 注意：这里的 self.data() 已经是切片 &self.data[self.offset..][..self.length]
+        // 所以外部看到的 [0..length] 就是张量有效部分
+        &self.data()[index]
+    }
+}
+
+impl IndexMut<usize> for Tensor<f32> {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        // data_mut() 是 unsafe 的，因为涉及到从 Arc<Box<[T]>> 中取出可变指针。
+        // 这里我们直接用 unsafe 包裹
+        unsafe {
+            &mut self.data_mut()[index]
+        }
+    }
+}
 // Some helper functions for testing and debugging
 impl Tensor<f32> {
     #[allow(unused)]
@@ -89,6 +108,23 @@ impl Tensor<f32> {
             let start = i * dim;
             println!("{:?}", &self.data()[start..][..dim]);
         }
+    }
+    #[allow(unused)]
+    pub fn copy_from(&mut self, other: &Self) {
+        if self.size() != other.size() {
+            panic!(
+                "copy_from: size mismatch, self.size()={}, other.size()={}",
+                self.size(),
+                other.size()
+            );
+        }
+        unsafe {
+            self.data_mut().copy_from_slice(other.data());
+        }
+    }
+    #[allow(unused)]
+    pub fn len(&self) -> usize {
+        self.data.len()
     }
 }
 

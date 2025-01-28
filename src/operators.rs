@@ -106,12 +106,6 @@ pub fn masked_softmax(y: &mut Tensor<f32>) {
 }
 
 pub fn rms_norm(y: &mut Tensor<f32>, x: &Tensor<f32>, w: &Tensor<f32>, epsilon: f32) {
-    // assert!(
-    //     x.shape() == y.shape(),
-    //     "Shapes of x and y must be equal. x: {:?}, y: {:?}",
-    //     x.shape(),
-    //     y.shape()
-    // );
     assert!(
         w.shape().len() == 1 && *w.shape() == vec![*x.shape().last().unwrap()],
         "Shape of w must match the last dimension of x. w: {:?}, x_last_dim: {:?}",
@@ -128,7 +122,7 @@ pub fn rms_norm(y: &mut Tensor<f32>, x: &Tensor<f32>, w: &Tensor<f32>, epsilon: 
     let w_data = w.data();
     let y_data = unsafe { y.data_mut() };
 
-    // 遍历每个批次进行计算
+
     for i in 0..batch_size {
         let start = i * dim;
         let x_batch = &x_data[start..start + dim];
@@ -155,7 +149,6 @@ pub fn swiglu(y: &mut Tensor<f32>, x: &Tensor<f32>) {
     for i in 0..len {
         _y[i] *= _x[i] / (1. + (-_x[i]).exp());
     }
-    // todo!("实现 silu，这里给了一些前期准备工作的提示，你可以参考")
 }
 
 // C = beta * C + alpha * A @ B^T
@@ -181,17 +174,14 @@ pub fn matmul_transb(c: &mut Tensor<f32>, beta: f32, a: &Tensor<f32>, b: &Tensor
     let b_data = b.data();        // B只读
     let c_data = unsafe { c.data_mut() }; // C要写
 
-    //    c[i, j] = beta * c[i, j] + alpha * Σ_p( A[i, p] * B[j, p] )
     for i in 0..m {
         for j in 0..n {
-            // 先乘 beta
             let mut tmp = beta * c_data[i * n + j];
             // 再加上 alpha * ( A[i,p] * B[j,p] ) 的累加和
             let mut sum = 0.0;
             for p in 0..k {
                 sum += a_data[i * k + p] * b_data[j * k + p];
             }
-            // 写回 C
             c_data[i * n + j] = tmp + alpha * sum;
         }
     }

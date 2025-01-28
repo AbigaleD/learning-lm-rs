@@ -8,6 +8,9 @@ use crate::params::LLamaParams;
 use crate::tensor::Tensor;
 use safetensors::SafeTensors;
 use std::path::Path;
+use crate::operators::rms_norm;
+use crate::operators::matmul_transb;
+use crate::operators::swiglu;
 pub struct Llama<T> {
     vocab: usize,           // vocab size
     n_layers: usize,        // number of layers
@@ -167,9 +170,35 @@ fn mlp(
     rms_w: &Tensor<f32>,
     eps: f32,
 ) {
-    todo!("Implement mlp");
-}
+     // 1. 对 residual 做 RMSNorm，结果放到 hidden_states 中
+    rms_norm(hidden_states, residual, rms_w, eps);
 
+    // 2. 计算 gate = hidden_states @ w_gate.T
+    matmul_transb(gate, 0.0, hidden_states, w_gate, 1.0);
+
+    // 3. 计算 up = hidden_states @ w_up.T
+    matmul_transb(up, 0.0, hidden_states, w_up, 1.0);
+
+
+    for i in 0..gate.len() {
+        let g = gate[i];
+        gate[i] = g * sigmoid(g) * up[i];
+    }
+
+    // 5. 计算输出 hidden_states = gate @ w_down.T
+    matmul_transb(hidden_states, 0.0, gate, w_down, 1.0);
+
+    // 6. 残差连接：residual += hidden_states
+    //    然后把新的结果拷回 hidden_states 供后面使用
+    for i in 0..residual.len() {
+        residual[i] += hidden_states[i];
+    }
+    hidden_states.copy_from(residual);
+
+}
+fn sigmoid(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
+}
 #[test]
 pub fn test_mlp() {
     let seq_len = 4;
