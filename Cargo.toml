@@ -1,3 +1,4 @@
+cargo-features = ["profile-rustflags"]
 [package]
 name = "learning-lm-rust"
 version = "0.1.0"
@@ -9,8 +10,15 @@ serde_json = "1.0"
 safetensors = "0.4.3"
 tokenizers = "0.19.1"
 rand = "0.8"
+bytemuck = "1.13"
 
 [package.metadata.scripts]
 run = "RUSTFLAGS='-A unused-variables' cargo run"
 quiet_run = "RUSTFLAGS='-Awarnings' cargo run"
 test = "RUSTFLAGS='-Awarnings' cargo test"
+
+[profile.dev]
+rustflags = ["-Awarnings"]
+
+[profile.test]
+rustflags = ["-Awarnings"]

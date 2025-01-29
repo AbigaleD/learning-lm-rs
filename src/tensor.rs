@@ -65,6 +65,16 @@ impl<T: Copy + Clone + Default> Tensor<T> {
             length: new_length,
         }
     }
+    pub fn clone(&self) -> Self {
+        // Arc<Box<[T]>> 调用 .clone() 会做引用计数的浅复制
+        // shape.clone() 会复制一个新的 Vec<usize>
+        Self {
+            data: self.data.clone(),
+            shape: self.shape.clone(),
+            offset: self.offset,
+            length: self.length,
+        }
+    }
 
 
 }
