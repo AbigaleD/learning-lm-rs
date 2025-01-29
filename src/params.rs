@@ -28,7 +28,6 @@ fn find_num_layers(safetensor: &SafeTensors) -> usize {
     // count
 }
 
-/// 你的参数结构体 (保持不变)
 pub struct LLamaParams<T> {
     // token_id to embedding lookup table
     pub embedding_table: Tensor<T>, // (vocab_size, dim)
@@ -108,7 +107,6 @@ impl LLamaParams<f32> {
 
         let lm_head = get_tensor(safetensor, "lm_head.weight");
 
-        // 7. 返回组装好的 LLamaParams
         LLamaParams {
             embedding_table,
             rms_att_w,
