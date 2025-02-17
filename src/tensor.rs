@@ -110,6 +110,12 @@ impl Tensor<f32> {
         return a.iter().zip(b).all(|(x, y)| float_eq(x, y, rel));
     }
     #[allow(unused)]
+    pub fn zeros(shape: &Vec<usize>) -> Self {
+        let length: usize = shape.iter().product();
+        let data = vec![0.0; length]; // 生成全零数据
+        Self::new(data, shape)
+    }
+    #[allow(unused)]
     pub fn print(&self){
         println!("shpae: {:?}, offset: {}, length: {}", self.shape, self.offset, self.length);
         let dim = self.shape()[self.shape().len() - 1];
@@ -136,6 +142,7 @@ impl Tensor<f32> {
     pub fn len(&self) -> usize {
         self.data.len()
     }
+    
 }
 
 #[inline]

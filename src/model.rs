@@ -11,6 +11,14 @@ use std::path::Path;
 use crate::operators::rms_norm;
 use crate::operators::matmul_transb;
 use crate::operators::swiglu;
+use crate::operators::masked_softmax;
+
+use rand::prelude::*;
+use rand::distributions::WeightedIndex; 
+use ndarray::s; 
+// use tch::Tensor;
+
+use std::ops::AddAssign;
 pub struct Llama<T> {
     vocab: usize,           // vocab size
     n_layers: usize,        // number of layers
@@ -27,7 +35,8 @@ pub struct Llama<T> {
     eos_token_id: u32,      // end token id
 }
 
-impl Llama<f32> {
+impl Llama<f32> 
+{
     pub fn from_safetensors(model_dir: impl AsRef<Path>) -> Self {
         let config = File::open(model_dir.as_ref().join("config.json")).unwrap();
         let config: LlamaConfigJson = serde_json::from_reader(config).unwrap();
@@ -155,8 +164,35 @@ fn self_attention(
     seq_len: usize,
     total_seq_len: usize,
     dqkv: usize,
-) {
-    todo!("Implement self_attention");
+) 
+{
+    // todo!("Implement self_attention");
+    // 1. 计算 Q K^T, 存入 att_scores
+    matmul_transb(att_scores, 0.0, q, k, 1.0);
+
+    // 2. 归一化 att_scores /= sqrt(dim)
+    let scale = 1.0 / (dqkv as f32).sqrt();
+    let attn_data = unsafe { att_scores.data_mut() };
+    for v in attn_data.iter_mut() {
+        *v *= scale;
+    }
+
+    // 3. 计算 softmax
+    masked_softmax(att_scores);
+
+    // 4. 计算 attn_V = attn @ V
+    let mut attn_v = Tensor::<f32>::zeros(hidden_states.shape());
+    matmul_transb(&mut attn_v, 0.0, att_scores, v, 1.0);
+
+    // 5. 更新 hidden_states (手动逐元素相加)
+    let hidden_data = unsafe { hidden_states.data_mut() };
+    let attn_data = attn_v.data(); // 只读数据
+
+    for (h, a) in hidden_data.iter_mut().zip(attn_data.iter()) 
+    {
+        *h += a;
+    }
+    
 }
 
 fn mlp(

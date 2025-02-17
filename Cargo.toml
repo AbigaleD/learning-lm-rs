@@ -11,6 +11,9 @@ safetensors = "0.4.3"
 tokenizers = "0.19.1"
 rand = "0.8"
 bytemuck = "1.13"
+rand_distr = "0.5.0"
+ndarray = "0.16.1"
+tch = "0.9"
 
 [package.metadata.scripts]
 run = "RUSTFLAGS='-A unused-variables' cargo run"

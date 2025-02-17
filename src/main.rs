@@ -7,8 +7,10 @@ mod tensor;
 
 use std::path::PathBuf;
 use tokenizers::Tokenizer;
-
+use crate::tensor::Tensor;
+use std::any::type_name;
 fn main() {
+    println!("{}", type_name::<Tensor<f32>>());
     let project_dir = env!("CARGO_MANIFEST_DIR");
     let model_dir = PathBuf::from(project_dir).join("models").join("story");
     let llama = model::Llama::<f32>::from_safetensors(&model_dir);
