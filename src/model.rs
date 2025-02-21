@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::usize;
 use std::vec;
 
 use crate::config::LlamaConfigJson;
@@ -113,10 +114,51 @@ impl Llama<f32>
             let full_k = &mut cache.k_cache(layer, 0); // (total_seq, n_kv_h * dqkv)
             let full_v = &mut cache.v_cache(layer, 0); // (total_seq, n_kv_h * dqkv)
 
-            todo!("self_attention(...)");
-            todo!("down_proj matmul and add residual");
+            // todo!("self_attention(...)");
+            // todo!("down_proj matmul and add residual");
 
-            todo!("mlp(...)");
+            // todo!("mlp(...)");
+
+            // -------new starts here-----------
+            
+            // --- 4. 自注意力 ---
+            self_attention(
+                &mut hidden_states, // 用来盛放注意力结果
+                &mut att_scores,
+                &q_buf,   // Q
+                full_k,   // K (含历史tokens)
+                full_v,   // V (含历史tokens)
+                self.n_kv_h,
+                n_groups,
+                seq_len,
+                total_seq_len,
+                self.dqkv,
+            );
+            
+            // --- 5. 下游投影 (wo) + 残差 ---
+            // 这一部分把 hidden_states 投影回 d 维度，然后加到 residual 上
+            let mut att_output = Tensor::<f32>::default(&vec![seq_len, self.d]);
+            OP::matmul_transb(&mut att_output, 0.0, &hidden_states, &self.params.wo[layer], 1.0);
+
+            for i in 0..residual.len() {
+                residual[i] += att_output[i];
+            }
+
+
+            // --- 6. MLP ---
+            mlp(
+                &mut residual,
+                &mut hidden_states,
+                &mut gate_buf,
+                &mut up_buf,
+                &self.params.w_up[layer],
+                &self.params.w_down[layer],
+                &self.params.w_gate[layer],
+                &self.params.rms_ffn_w[layer],
+                self.eps,
+            );
+
+
         }
 
         // No matter what seq_len, the output is always a 1D vector of length vocab,
@@ -137,6 +179,117 @@ impl Llama<f32>
         logits
     }
 
+
+pub fn apply_temperature(logits: &mut Vec<f32>, temperature: f32) {
+    // 0 for greedy, 1 for non-resize
+    if temperature <= 0.0 {
+        return;
+    }
+    let inv_temp = 1.0 / temperature;
+    for logit in logits.iter_mut() {
+        *logit *= inv_temp;
+    }
+}
+fn top_k_filter(probs:&mut [f32],k:usize)
+{
+    //要选top k个 但是没有k个给我们选
+    if k >= probs.len()
+    {
+        return;
+    }
+    // 找到第 k 大的元素（这一块咨询了gpt
+    let mut probs_copy = probs.to_vec(); // 复制一份
+    let (_, kth_largest, _) = probs_copy.select_nth_unstable_by(k, |a, b| b.partial_cmp(a).unwrap());
+
+    let threshold = *kth_largest; // k 大元素中的最小值
+
+    // 过滤掉小于 threshold 的元素
+    for p in probs.iter_mut() {
+        if *p < threshold {
+            *p = 0.0;
+        }
+    }
+
+}
+
+//概率从大到小累加，直到超过p的部分 为0
+pub fn top_p_filter(probs:&mut[f32],p:f32)
+{
+    // 1. 复制并排序，保留原索引
+    let mut indexed_probs: Vec<(usize, f32)> = probs.iter().copied().enumerate().collect();
+    indexed_probs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap()); // 降序排序
+
+    // 2. 计算累积概率
+    let mut cumulative_prob = 0.0;
+    let mut threshold_index = indexed_probs.len(); // 记录需要保留的范围
+    for (i, &(_, prob)) in indexed_probs.iter().enumerate() {
+        cumulative_prob += prob;
+        if cumulative_prob >= p {
+            threshold_index = i + 1; // 保留前 i+1 个元素
+            break;
+        }
+    }
+
+    // 3. 过滤掉累积概率之外的值
+    let threshold_set: std::collections::HashSet<usize> = indexed_probs[..threshold_index]
+        .iter()
+        .map(|&(idx, _)| idx)
+        .collect();
+
+    for (i, prob) in probs.iter_mut().enumerate() {
+        if !threshold_set.contains(&i) {
+            *prob = 0.0;
+        }
+    }
+}
+
+
+
+// pub fn sample_from_logits(
+//     logits:&Tensor<f32>,
+//     top_p:f32,
+//     top_k:usize,
+//     temperature: f32,
+//     rng:&mut ThreadRng,
+// )-> u32{
+//     let mut probs = logits.data().to_vec();
+
+//     apply_temperature(&mut probs,temperature);
+// }
+pub fn sample_from_logits(
+    logits: &Tensor<f32>,
+    top_p: f32,
+    top_k: usize,
+    temperature: f32,
+    rng: &mut ThreadRng,
+) -> u32 {
+    let mut probs = logits.data().to_vec(); // -> Vec<f32>
+
+// 显式转成切片
+    Self::apply_temperature(&mut probs, temperature);
+    Self::top_k_filter(&mut probs, top_k);
+    Self::top_p_filter(probs.as_mut_slice(), top_p);
+
+    // 3. 归一化到概率分布
+    let sum: f32 = probs.iter().sum();
+    if sum > 1e-8 {
+        for p in probs.iter_mut() {
+            *p /= sum;
+        }
+    } else {
+        // 如果数值异常，可以做一个fallback，这里简单给 uniform
+        let val = 1.0 / (probs.len() as f32);
+        for p in probs.iter_mut() {
+            *p = val;
+        }
+    }
+
+    // 4. multinomial 抽样
+    let dist = WeightedIndex::new(&probs).unwrap();
+    dist.sample(rng) as u32
+}
+
+
     pub fn generate(
         &self,
         token_ids: &[u32],
@@ -145,20 +298,74 @@ impl Llama<f32>
         top_k: u32,
         temperature: f32,
     ) -> Vec<u32>{
-        let mut result = Vec::<u32>::new();
+        // let mut result = Vec::<u32>::new();
         
-        todo!("实现文本生成");
+        // // todo!("实现文本生成");
+        // let mut rng= thread_rng();
+        // let mut result = token_ids.to_vec();
+        // let mut cache = self.new_cache();
+        // for _ in 0..max_len
+        // {
+        //     let input_tensor = Tensor::<u32>::new(result.clone(),&vec![result.len()]);
+        //     let logits = self.forward(&input_tensor, &mut cache);
+        //     // let next_token= sample_from_logits(&logits,top_p,top_k,)
+        // }
+        // result
+
         
-        result
+
     }
 }
 
+// fn self_attention(
+//     hidden_states: &mut Tensor<f32>, // (seq, n_kv_h * n_groups * dqkv)
+//     att_scores: &mut Tensor<f32>,    // (n_kv_h, n_groups, seq, total_seq)
+//     q: &Tensor<f32>,                 // (seq, n_kv_h * n_groups * dqkv)
+//     k: &Tensor<f32>,                 // (total_seq, n_kv_h * dqkv)
+//     v: &Tensor<f32>,                 // (total_seq, n_kv_h * dqkv)
+//     n_kv_h: usize,
+//     n_groups: usize,
+//     seq_len: usize,
+//     total_seq_len: usize,
+//     dqkv: usize,
+// ) 
+// {
+//     // todo!("Implement self_attention");
+//     // 1. 计算 Q K^T, 存入 att_scores
+//     matmul_transb(att_scores, 0.0, q, k, 1.0);
+
+//     // 2. 归一化 att_scores /= sqrt(dim)
+//     let scale = 1.0 / (dqkv as f32).sqrt();
+//     let attn_data = unsafe { att_scores.data_mut() };
+//     for v in attn_data.iter_mut() {
+//         *v *= scale;
+//     }
+
+//     // 3. 计算 softmax
+//     masked_softmax(att_scores);
+
+//     // 4. 计算 attn_V = attn @ V
+//     let mut attn_v = Tensor::<f32>::zeros(hidden_states.shape());
+//     matmul_transb(&mut attn_v, 0.0, att_scores, v, 1.0);
+
+//     // 5. 更新 hidden_states (手动逐元素相加)
+//     let hidden_data = unsafe { hidden_states.data_mut() };
+//     let attn_data = attn_v.data(); // 只读数据
+
+//     for (h, a) in hidden_data.iter_mut().zip(attn_data.iter()) 
+//     {
+//         *h += a;
+//     }
+    
+// }
+
+
 fn self_attention(
-    hidden_states: &mut Tensor<f32>, // (seq, n_kv_h * n_groups * dqkv)
+    hidden_states: &mut Tensor<f32>, // (seq, n_q_h*dqkv) == (seq, n_kv_h * n_groups * dqkv)
     att_scores: &mut Tensor<f32>,    // (n_kv_h, n_groups, seq, total_seq)
-    q: &Tensor<f32>,                 // (seq, n_kv_h * n_groups * dqkv)
-    k: &Tensor<f32>,                 // (total_seq, n_kv_h * dqkv)
-    v: &Tensor<f32>,                 // (total_seq, n_kv_h * dqkv)
+    q: &Tensor<f32>,                 // (seq, n_q_h*dqkv)
+    k: &Tensor<f32>,                 // (total_seq, n_kv_h*dqkv)
+    v: &Tensor<f32>,                 // (total_seq, n_kv_h*dqkv)
     n_kv_h: usize,
     n_groups: usize,
     seq_len: usize,
@@ -170,31 +377,33 @@ fn self_attention(
     // 1. 计算 Q K^T, 存入 att_scores
     matmul_transb(att_scores, 0.0, q, k, 1.0);
 
-    // 2. 归一化 att_scores /= sqrt(dim)
-    let scale = 1.0 / (dqkv as f32).sqrt();
-    let attn_data = unsafe { att_scores.data_mut() };
-    for v in attn_data.iter_mut() {
+    // 2. 缩放
+    let scale = 1.0 / (head_dim as f32).sqrt();
+    for v in scores_data.iter_mut() {
         *v *= scale;
     }
 
-    // 3. 计算 softmax
+    // 3. masked_softmax
+    //    这里假设你实现了一个 4D 版本的 masked_softmax，如果没有掩码就直接普通 softmax 即可
     masked_softmax(att_scores);
 
-    // 4. 计算 attn_V = attn @ V
-    let mut attn_v = Tensor::<f32>::zeros(hidden_states.shape());
-    matmul_transb(&mut attn_v, 0.0, att_scores, v, 1.0);
-
-    // 5. 更新 hidden_states (手动逐元素相加)
-    let hidden_data = unsafe { hidden_states.data_mut() };
-    let attn_data = attn_v.data(); // 只读数据
+    // 4. att_scores * V -> hidden_states
+    //    hidden_states 原 shape (seq, n_q_h*dqkv)
+    //    这里需要把每个 head 的注意力得分乘以对应的 V，然后再 sum 到一起
+    let v_data = v.data(); 
+    let mut out_data = vec![0.0; hidden_states.len()]; // 收集计算结果
 
     for (h, a) in hidden_data.iter_mut().zip(attn_data.iter()) 
     {
         *h += a;
     }
-    
-}
 
+    // 把 out_data 拷回 hidden_states
+    let hs_data = unsafe { hidden_states.data_mut() };
+    for i in 0..hs_data.len() {
+        hs_data[i] = out_data[i];
+    }
+}
 fn mlp(
     residual: &mut Tensor<f32>,
     hidden_states: &mut Tensor<f32>,
