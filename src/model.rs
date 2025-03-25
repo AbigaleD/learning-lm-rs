@@ -7,6 +7,7 @@ use crate::kvcache::KVCache;
 use crate::operators as OP;
 use crate::params::LLamaParams;
 use crate::tensor::Tensor;
+use rand::seq;
 use safetensors::SafeTensors;
 use std::path::Path;
 use crate::operators::rms_norm;
@@ -256,38 +257,39 @@ pub fn top_p_filter(probs:&mut[f32],p:f32)
 
 //     apply_temperature(&mut probs,temperature);
 // }
-pub fn sample_from_logits(
-    logits: &Tensor<f32>,
-    top_p: f32,
-    top_k: usize,
-    temperature: f32,
-    rng: &mut ThreadRng,
-) -> u32 {
-    let mut probs = logits.data().to_vec(); // -> Vec<f32>
+    pub fn sample_from_logits(
+        // &self,
+        logits: &Tensor<f32>,
+        top_p: f32,
+        top_k: usize,
+        temperature: f32,
+        rng: &mut ThreadRng,
+    ) -> u32 {
+        let mut probs = logits.data().to_vec(); // -> Vec<f32>
 
-// 显式转成切片
-    Self::apply_temperature(&mut probs, temperature);
-    Self::top_k_filter(&mut probs, top_k);
-    Self::top_p_filter(probs.as_mut_slice(), top_p);
+        // 显式转成切片
+        Self::apply_temperature(&mut probs, temperature);
+        Self::top_k_filter(&mut probs, top_k);
+        Self::top_p_filter(probs.as_mut_slice(), top_p);
 
-    // 3. 归一化到概率分布
-    let sum: f32 = probs.iter().sum();
-    if sum > 1e-8 {
-        for p in probs.iter_mut() {
-            *p /= sum;
+        // 3. 归一化到概率分布
+        let sum: f32 = probs.iter().sum();
+        if sum > 1e-8 {
+            for p in probs.iter_mut() {
+                *p /= sum;
+            }
+        } else {
+            // 如果数值异常，可以做一个fallback，这里简单给 uniform
+            let val = 1.0 / (probs.len() as f32);
+            for p in probs.iter_mut() {
+                *p = val;
+            }
         }
-    } else {
-        // 如果数值异常，可以做一个fallback，这里简单给 uniform
-        let val = 1.0 / (probs.len() as f32);
-        for p in probs.iter_mut() {
-            *p = val;
-        }
+
+        // 4. multinomial 抽样
+        let dist = WeightedIndex::new(&probs).unwrap();
+        dist.sample(rng) as u32
     }
-
-    // 4. multinomial 抽样
-    let dist = WeightedIndex::new(&probs).unwrap();
-    dist.sample(rng) as u32
-}
 
 
     pub fn generate(
@@ -301,16 +303,20 @@ pub fn sample_from_logits(
         // let mut result = Vec::<u32>::new();
         
         // // todo!("实现文本生成");
-        // let mut rng= thread_rng();
-        // let mut result = token_ids.to_vec();
-        // let mut cache = self.new_cache();
-        // for _ in 0..max_len
-        // {
-        //     let input_tensor = Tensor::<u32>::new(result.clone(),&vec![result.len()]);
-        //     let logits = self.forward(&input_tensor, &mut cache);
-        //     // let next_token= sample_from_logits(&logits,top_p,top_k,)
-        // }
-        // result
+        let mut rng= thread_rng();
+        let mut result = token_ids.to_vec();
+        let mut cache = self.new_cache();
+        for _ in 0..max_len
+        {
+            let input_tensor = Tensor::<u32>::new(result.clone(),&vec![result.len()]);
+            let logits = self.forward(&input_tensor, &mut cache);
+            let next_token = Self::sample_from_logits(&logits, top_p, top_k as usize, temperature, &mut rng);
+            result.push(next_token);
+            if next_token == self.eos_token_id{
+                break;
+            }
+        }
+        result
 
         
 
@@ -378,9 +384,9 @@ fn self_attention(
     matmul_transb(att_scores, 0.0, q, k, 1.0);
 
     // 2. 缩放
-    let scale = 1.0 / (head_dim as f32).sqrt();
-    for v in scores_data.iter_mut() {
-        *v *= scale;
+    let scale = 1.0 / (dqkv as f32).sqrt();
+    for val in unsafe { att_scores.data_mut() }.iter_mut() {
+        *val *= scale;
     }
 
     // 3. masked_softmax
@@ -393,10 +399,42 @@ fn self_attention(
     let v_data = v.data(); 
     let mut out_data = vec![0.0; hidden_states.len()]; // 收集计算结果
 
-    for (h, a) in hidden_data.iter_mut().zip(attn_data.iter()) 
+    for head in 0..n_kv_h
     {
-        *h += a;
+        for g in 0..n_groups
+        {
+            for s in 0..seq_len
+            {
+                //先准备一个sum向量，用于累加V*注意力权重
+                let mut sum_vec = vec![0.0;dqkv];
+
+                for t in 0..total_seq_len
+                {
+                    //取出注意力得分
+                    let pos = ((head*n_groups)*seq_len +s)*total_seq_len+t;
+                    let score = att_scores[pos];
+                    
+                    // 取出V向量（长度是dqkv)
+                    // V shape = (total_seq,n_kv_h*dqkv)
+                    let start_v = t*(n_kv_h * dqkv) +head *dqkv;
+
+                    for d in 0..dqkv
+                    {
+                        sum_vec[d] += score * v_data[start_v+d];
+                    }
+                }
+                
+                //把sum_vec 加到hidden_states[s, (head+g*heads)*dqkv..]
+                // hidden_states shape = (seq,n_q_h * dqkv)
+                let out_base = s * (n_kv_h * n_groups * dqkv) + (g * n_kv_h + head) * dqkv;
+                for d in 0..dqkv 
+                {
+                    out_data[out_base + d] += sum_vec[d];
+                }
+            }
+        }
     }
+
 
     // 把 out_data 拷回 hidden_states
     let hs_data = unsafe { hidden_states.data_mut() };
